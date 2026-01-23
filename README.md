@@ -3,7 +3,7 @@
 Qred - Quote Recurrent Editor & Dump to bot Discord, który pozwala na zbieranie, wyświetlanie i zarządzanie cytatami w Twoim serwerze. Możesz dodawać własne cytaty, wyświetlać losowe, przeglądać według autora oraz otrzymywać codzienny cytat.
 
 ## How to use
-• Dodaj bota do swojego serwera przy użyciu linku: https://discord.com/oauth2/authorize?client_id=<TWÓJ_CLIENT_ID>
+• Dodaj bota do swojego serwera przy użyciu linku: https://discord.com/oauth2/authorize?client_id=1464359456660914403
 
 • Używaj komend slash, aby dodawać cytaty, przeglądać je według autora, losowo lub codziennie. Aby zobaczyć wszystkie dostępne komendy, wpisz /commands.
 
