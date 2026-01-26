@@ -13,8 +13,6 @@ import hashlib
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID"))
-
-# JSON path in same folder as script
 QUOTE_FILE = pathlib.Path(__file__).parent / "quotes.json"
 
 # -------------------------------
@@ -32,7 +30,6 @@ def load_quotes():
         try:
             with open(QUOTE_FILE, "r", encoding="utf-8") as f:
                 quotes = json.load(f)
-                # Migrate old quotes without IDs
                 needs_save = False
                 next_id = max([q.get("id", 0) for q in quotes], default=0) + 1
                 for q in quotes:
@@ -97,11 +94,9 @@ def get_daily_quote_index(quotes):
 
 def can_modify_quote(interaction, quote, owner_id):
     """Check if user can modify this quote"""
-    # Owner can modify anything
     if interaction.user.id == owner_id:
         return True
     
-    # Check if user is the author
     author_names = [a.strip() for a in quote["author"].split(",")]
     return interaction.user.name in author_names
 
@@ -117,24 +112,27 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync commands: {e}")
     
-    # Set daily quote as status
     quotes = load_quotes()
     if quotes:
-        # Filter quotes that fit in status (max 128 chars)
-        valid_quotes = [q for q in quotes if len(q["text"]) <= 128]
+        valid_quotes = []
+        for q in quotes:
+            status_text = f'"{q["text"]}" - {q["author"]} ({q["date"]})'
+            if len(status_text) <= 128:
+                valid_quotes.append(q)
         
         if valid_quotes:
             index = get_daily_quote_index(valid_quotes)
             daily_quote = valid_quotes[index]
+            status_text = f'"{daily_quote["text"]}" - {daily_quote["author"]} ({daily_quote["date"]})'
             
             await bot.change_presence(
                 activity=discord.Activity(
-                    type=discord.ActivityType.custom,
-                    name=daily_quote["text"]
+                    type=discord.ActivityType.watching,
+                    name=status_text
                 )
             )
+            print(f"Status set to: {status_text}")
         else:
-            # All quotes too long, use fallback
             await bot.change_presence(
                 activity=discord.Activity(
                     type=discord.ActivityType.watching,
@@ -177,32 +175,27 @@ async def add_slash(
     
     quotes_data = load_quotes()
     
-    # Fetch more messages to account for skips and bot messages
     all_messages = [msg async for msg in interaction.channel.history(limit=50)]
     
-    # Filter out bot messages
     non_bot_messages = [msg for msg in all_messages if not msg.author.bot]
     
     if not non_bot_messages:
         await interaction.followup.send("No suitable messages found in recent history.")
         return
     
-    # Apply skip
     if skip >= len(non_bot_messages):
         await interaction.followup.send(f"Cannot skip {skip} messages, only {len(non_bot_messages)} available.")
         return
     
     available_messages = non_bot_messages[skip:]
     
-    # Get requested number of messages
     if messages > len(available_messages):
         await interaction.followup.send(f"Cannot get {messages} messages, only {len(available_messages)} available after skip.")
         return
     
     selected_messages = available_messages[:messages]
-    selected_messages.reverse()  # Oldest first for proper reading order
+    selected_messages.reverse()
     
-    # Filter by author if specified
     if author:
         author_lower = author.lower()
         selected_messages = [msg for msg in selected_messages if msg.author.name.lower() == author_lower]
@@ -211,18 +204,15 @@ async def add_slash(
             await interaction.followup.send(f"No messages found from author '{author}' in the selected range.")
             return
     
-    # Validate messages
     if not selected_messages:
         await interaction.followup.send("No valid messages to add as quote.")
         return
     
-    # Check for empty messages
     valid_messages = [msg for msg in selected_messages if msg.content.strip()]
     if not valid_messages:
         await interaction.followup.send("Cannot add empty messages as quote.")
         return
     
-    # Build combined quote
     quote_lines = []
     authors = []
     seen_authors = set()
@@ -240,7 +230,6 @@ async def add_slash(
         await interaction.followup.send("Combined quote too long (max 500 characters).")
         return
     
-    # Create author string
     if len(authors) == 1:
         author_str = authors[0]
     else:
@@ -384,7 +373,6 @@ async def mine_slash(interaction: discord.Interaction):
     
     user_name = interaction.user.name
     
-    # Find quotes where user is an author (handle multi-author quotes)
     filtered = []
     for q in quotes:
         author_names = [a.strip().lower() for a in q["author"].split(",")]
