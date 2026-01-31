@@ -217,8 +217,18 @@ async def add_slash(
     authors = []
     seen_authors = set()
     
+    # Check if all messages are from the same author
+    first_author = valid_messages[0].author.name.lower()
+    all_same_author = all(msg.author.name.lower() == first_author for msg in valid_messages)
+    
     for msg in valid_messages:
-        quote_lines.append(msg.content.strip())
+        if all_same_author:
+            # If all from same author, just add the text
+            quote_lines.append(msg.content.strip())
+        else:
+            # If from different authors, format as "text - author"
+            quote_lines.append(f"{msg.content.strip()} - {msg.author.name}")
+        
         author_lower = msg.author.name.lower()
         if author_lower not in seen_authors:
             authors.append(msg.author.name)
