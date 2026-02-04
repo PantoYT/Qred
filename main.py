@@ -6,6 +6,9 @@ import os
 from datetime import datetime
 import pathlib
 import hashlib
+import re
+import asyncio
+import random
 
 # -------------------------------
 # Load environment
@@ -20,7 +23,12 @@ QUOTE_FILE = pathlib.Path(__file__).parent / "quotes.json"
 # -------------------------------
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="/", intents=intents)
+bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
+
+# Rave mode state
+rave_mode_active = False
+rave_task = None
+annoy_user_id = None
 
 # -------------------------------
 # Helper functions
@@ -82,6 +90,18 @@ def categorize_author(count):
     else:
         return "Marcus Aurelius"
 
+def clean_quote_text(text):
+    """Remove Discord mentions and clean text for status"""
+    # Remove user mentions <@123456789> or <@!123456789>
+    text = re.sub(r'<@!?\d+>', '', text)
+    # Remove role mentions <@&123456789>
+    text = re.sub(r'<@&\d+>', '', text)
+    # Remove channel mentions <#123456789>
+    text = re.sub(r'<#\d+>', '', text)
+    # Clean up extra spaces
+    text = ' '.join(text.split())
+    return text.strip()
+
 def get_daily_quote_index(quotes):
     if not quotes:
         return 0
@@ -100,38 +120,96 @@ def can_modify_quote(interaction, quote, owner_id):
     author_names = [a.strip() for a in quote["author"].split(",")]
     return interaction.user.name in author_names
 
+def get_valid_status_quotes(quotes):
+    """Filter quotes that fit in status (max 128 chars after cleaning)"""
+    valid = []
+    for q in quotes:
+        cleaned_text = clean_quote_text(q["text"])
+        status_text = f'"{cleaned_text}" - {q["author"]}'
+        if len(status_text) <= 128:
+            valid.append(q)
+    return valid
+
+async def set_status_to_quote(quote):
+    """Set bot status to a specific quote"""
+    cleaned_text = clean_quote_text(quote["text"])
+    status_text = f'"{cleaned_text}" - {quote["author"]}'
+    
+    await bot.change_presence(
+        activity=discord.Activity(
+            type=discord.ActivityType.watching,
+            name=status_text
+        )
+    )
+    print(f"Status set to: {status_text}")
+
+def format_rave_message(quote):
+    """Format quote message for rave mode (simple text, no embeds)"""
+    return f'**RAVE MODE** 🎉\n"{quote["text"]}" - {quote["author"]} (#{quote["id"]})'
+
+async def rave_mode_loop(channel_to_spam=None):
+    """Main rave mode loop - cycles quotes every 5 seconds"""
+    global rave_mode_active, annoy_user_id
+    
+    quotes = load_quotes()
+    valid_quotes = get_valid_status_quotes(quotes)
+    
+    if not valid_quotes:
+        valid_quotes = quotes  # Fallback to all quotes
+    
+    index = 0
+    
+    while rave_mode_active:
+        try:
+            quote = valid_quotes[index % len(valid_quotes)]
+            
+            # Update status
+            await set_status_to_quote(quote)
+            
+            # Send message to channel if provided
+            if channel_to_spam:
+                message_text = format_rave_message(quote)
+                
+                # Add ping if set
+                if annoy_user_id == "everyone":
+                    message_text = f"@everyone\n{message_text}"
+                elif annoy_user_id:
+                    message_text = f"<@{annoy_user_id}>\n{message_text}"
+                
+                await channel_to_spam.send(message_text)
+            
+            index += 1
+            await asyncio.sleep(5)
+            
+        except Exception as e:
+            print(f"Rave mode error: {e}")
+            await asyncio.sleep(5)
+
 # -------------------------------
 # Events
 # -------------------------------
 @bot.event
 async def on_ready():
     print(f"Bot logged in as {bot.user}")
+    
+    # List all registered commands BEFORE sync
+    print(f"Commands registered: {[cmd.name for cmd in bot.tree.get_commands()]}")
+    
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} slash commands")
+        print(f"Command names: {[cmd.name for cmd in synced]}")
     except Exception as e:
         print(f"Failed to sync commands: {e}")
     
     quotes = load_quotes()
     if quotes:
-        valid_quotes = []
-        for q in quotes:
-            status_text = f'"{q["text"]}" - {q["author"]} ({q["date"]})'
-            if len(status_text) <= 128:
-                valid_quotes.append(q)
+        valid_quotes = get_valid_status_quotes(quotes)
         
         if valid_quotes:
             index = get_daily_quote_index(valid_quotes)
             daily_quote = valid_quotes[index]
-            status_text = f'"{daily_quote["text"]}" - {daily_quote["author"]} ({daily_quote["date"]})'
-            
-            await bot.change_presence(
-                activity=discord.Activity(
-                    type=discord.ActivityType.watching,
-                    name=status_text
-                )
-            )
-            print(f"Status set to: {status_text}")
+            await set_status_to_quote(daily_quote)
         else:
             await bot.change_presence(
                 activity=discord.Activity(
@@ -160,6 +238,8 @@ async def commands_slash(interaction: discord.Interaction):
     embed.add_field(name="/mine", value="Show all your quotes", inline=False)
     embed.add_field(name="/edit", value="Edit one of your quotes", inline=False)
     embed.add_field(name="/delete", value="Delete one of your quotes", inline=False)
+    embed.add_field(name="/cycle", value="Cycle to next status quote (owner only)", inline=False)
+    embed.add_field(name="/rave", value="🎉 Toggle RAVE MODE - quotes every 5s! (owner only)", inline=False)
     embed.add_field(name="/all", value="Show all quotes (owner only)", inline=False)
     embed.add_field(name="/shutdown", value="Shut down the bot (owner only)", inline=False)
     await interaction.response.send_message(embed=embed)
@@ -338,6 +418,122 @@ async def delete_slash(interaction: discord.Interaction, quote_id: int):
         f'Quote #{quote_id} deleted: "{quote["text"]}" - {quote["author"]} ({quote["date"]})'
     )
 
+@bot.tree.command(name="cycle", description="Cycle to next status quote (owner only)")
+async def cycle_slash(interaction: discord.Interaction):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message("Owner-only command.", ephemeral=True)
+        return
+    
+    quotes = load_quotes()
+    
+    if not quotes:
+        await interaction.response.send_message("No quotes to cycle through.", ephemeral=True)
+        return
+    
+    valid_quotes = get_valid_status_quotes(quotes)
+    
+    if not valid_quotes:
+        await interaction.response.send_message("No quotes fit in status (max 128 chars).", ephemeral=True)
+        return
+    
+    # Get current status to find next quote
+    current_activity = bot.activity
+    current_index = 0
+    
+    if current_activity:
+        current_status = current_activity.name
+        # Try to find current quote in valid quotes
+        for i, q in enumerate(valid_quotes):
+            cleaned_text = clean_quote_text(q["text"])
+            status_text = f'"{cleaned_text}" - {q["author"]}'
+            if status_text == current_status:
+                current_index = i
+                break
+    
+    # Get next quote (wrap around)
+    next_index = (current_index + 1) % len(valid_quotes)
+    next_quote = valid_quotes[next_index]
+    
+    await set_status_to_quote(next_quote)
+    
+    cleaned_text = clean_quote_text(next_quote["text"])
+    await interaction.response.send_message(
+        f'Status cycled to quote #{next_quote["id"]}:\n"{cleaned_text}" - {next_quote["author"]}'
+    )
+
+@bot.tree.command(name="rave", description="🎉 Toggle RAVE MODE - quotes cycle every 5 seconds!")
+async def rave_slash(interaction: discord.Interaction, annoy: str = None):
+    """
+    Toggle rave mode - cycles quotes every 5 seconds!
+    
+    Parameters:
+    - annoy: Optional - user ID (1234567890) or "everyone" to ping @everyone
+    """
+    global rave_mode_active, rave_task, annoy_user_id
+    
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message("Owner-only command.", ephemeral=True)
+        return
+    
+    quotes = load_quotes()
+    if not quotes:
+        await interaction.response.send_message("No quotes available for rave mode!", ephemeral=True)
+        return
+    
+    if rave_mode_active:
+        # Stop rave mode
+        rave_mode_active = False
+        annoy_user_id = None
+        
+        if rave_task:
+            rave_task.cancel()
+            rave_task = None
+        
+        # Set back to daily quote
+        valid_quotes = get_valid_status_quotes(quotes)
+        if valid_quotes:
+            index = get_daily_quote_index(valid_quotes)
+            await set_status_to_quote(valid_quotes[index])
+        
+        await interaction.response.send_message("🛑 Rave mode DISABLED. Back to chill vibes.")
+    
+    else:
+        # Start rave mode
+        rave_mode_active = True
+        
+        # Parse annoy parameter
+        if annoy:
+            annoy_lower = annoy.strip().lower()
+            if annoy_lower == "everyone":
+                annoy_user_id = "everyone"
+            else:
+                try:
+                    annoy_user_id = int(annoy.strip())
+                except ValueError:
+                    await interaction.response.send_message("Invalid format. Use user ID (1234567890) or 'everyone'", ephemeral=True)
+                    rave_mode_active = False
+                    return
+        else:
+            annoy_user_id = None
+        
+        # Determine channel to spam
+        # Use current channel if in guild, None if in DM (status only)
+        spam_channel = interaction.channel if interaction.guild else None
+        
+        # Start the rave loop
+        rave_task = asyncio.create_task(rave_mode_loop(spam_channel))
+        
+        if spam_channel:
+            annoy_msg = ""
+            if annoy_user_id == "everyone":
+                annoy_msg = " | Pinging @everyone"
+            elif annoy_user_id:
+                annoy_msg = f" | Pinging <@{annoy_user_id}>"
+            await interaction.response.send_message(f"🎉 RAVE MODE ACTIVATED! 🎉\nQuotes cycling every 5 seconds in this channel!{annoy_msg}")
+        else:
+            await interaction.response.send_message("🎉 RAVE MODE ACTIVATED! 🎉\nStatus cycling every 5 seconds (DM mode - no messages)")
+
+
 @bot.tree.command(name="all", description="Show all quotes (owner only)")
 async def all_slash(interaction: discord.Interaction):
     if interaction.user.id != OWNER_ID:
@@ -448,6 +644,35 @@ async def shutdown_slash(interaction: discord.Interaction):
     
     await interaction.response.send_message("Shutting down...")
     await bot.close()
+
+@bot.tree.command(name="sync", description="Force sync slash commands (owner only)")
+async def sync_slash(interaction: discord.Interaction):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message("You don't have permission.", ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        # Sync globally
+        synced = await bot.tree.sync()
+        
+        # Also sync to current guild for immediate effect
+        if interaction.guild:
+            guild_synced = await bot.tree.sync(guild=interaction.guild)
+            await interaction.followup.send(
+                f"✅ Synced {len(synced)} global commands\n"
+                f"✅ Synced {len(guild_synced)} commands to this server\n"
+                f"Commands should appear immediately!",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                f"✅ Synced {len(synced)} global commands",
+                ephemeral=True
+            )
+    except Exception as e:
+        await interaction.followup.send(f"❌ Sync failed: {e}", ephemeral=True)
 
 # -------------------------------
 # Run the bot
